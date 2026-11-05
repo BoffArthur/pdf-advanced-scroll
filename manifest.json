@@ -1,6 +1,6 @@
 {
-  "id": "pdf-preserve-horizontal-scroll",
-  "name": "PDF Preserve Horizontal Scroll",
+  "id": "pdf-advanced-scroll",
+  "name": "PDF Advanced Scroll",
   "version": "1.0.0",
   "minAppVersion": "1.6.0",
   "description": "Preserva a posição horizontal ao navegar entre páginas de um PDF.",

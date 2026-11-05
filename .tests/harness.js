@@ -133,6 +133,15 @@ function createPDF(app, { pages = 10, scrollWidth = 1200, rescroll = true, wrapp
     emit: (n, e) => (handlers[n] || []).forEach((h) => h(e))
   };
   const viewer = { eventBus, pagesCount: pages };
+  // Como o PDF.js: alterar a escala dispara scalechanging (a geometria não é recalculada aqui).
+  let scale = 1;
+  Object.defineProperty(viewer, "currentScale", {
+    get: () => scale,
+    set: (value) => {
+      scale = value;
+      eventBus.emit("scalechanging", { scale: value });
+    }
+  });
   Object.defineProperty(viewer, "currentPageNumber", {
     get: () => viewer.forced ?? Math.floor(geo.scrollTop / (PAGE_H + GAP)) + 1,
     set: (n) => (viewer.forced = n)

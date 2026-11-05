@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
 };
 const LOG_MAX = 400;
 const USER_INTENT_MS = 500;
+const RATIO_EPSILON = 1e-4;
 const NAV_CONTROL_SELECTOR = [
   "button",
   "[role='button']",
@@ -23,7 +24,7 @@ const NAV_CONTROL_SELECTOR = [
   ".pdf-sidebar-container"
 ].join(",");
 
-module.exports = class PDFPreserveHorizontalScroll extends Plugin {
+module.exports = class PDFAdvancedScroll extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (!["proportional", "absolute", "center"].includes(this.settings.positionMode)) {
@@ -87,7 +88,7 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
         new Notice("Log limpo.");
       }
     });
-    this.addSettingTab(new PDFPreserveScrollSettingTab(this.app, this));
+    this.addSettingTab(new PDFAdvancedScrollSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(scan);
   }
@@ -172,6 +173,11 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
       leaf,
       snap: null,
       pendingSyncSnap: null,
+      pendingScroll: null,
+      pendingScale: null,
+      lastRatio: null,
+      lastTop: el.scrollTop,
+      syncEchoUntil: 0,
       syncTarget: null,
       freeze: null,
       manualUntil: 0,
@@ -249,9 +255,11 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
         this.applyFreeze(state);
       }
     };
+    const scaleChanging = (event) => this.onScaleChanging(state, event);
     for (const [name, handler] of [
       ["pagechanging", pageChanging],
-      ["pagerendered", pageRendered]
+      ["pagerendered", pageRendered],
+      ["scalechanging", scaleChanging]
     ]) {
       state.eventBus.on(name, handler);
       state.handlers.push([name, handler]);
@@ -470,12 +478,123 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
         left: snap.left,
         ratioX: snap.ratioX
       };
+      target.pendingScroll = null;
     }
     for (const target of this.states.values()) {
       if (target !== source && target.pendingSyncSnap && this.isVisible(target.el)) {
         this.applyPendingSync(target);
       }
     }
+  }
+
+  // Rolagem do usuário: a vertical é replicada como o mesmo deslocamento em pixels da origem
+  // (o que o usuário vê na página selecionada). A horizontal é replicada pela proporção.
+  // PDFs ocultos recebem a proporção, pois perdem a rolagem ao ficar ocultos.
+  syncScrollPosition(source, prev, prevTop) {
+    if (!this.settings.syncScrolling) {
+      return;
+    }
+    const next = this.scrollRatio(source.el);
+    const dy = prevTop == null ? 0 : source.el.scrollTop - prevTop;
+    const changed = {};
+    if (!prev || Math.abs(next.y - prev.y) > RATIO_EPSILON) {
+      changed.y = next.y;
+    }
+    if (!prev || Math.abs(next.x - prev.x) > RATIO_EPSILON) {
+      changed.x = next.x;
+    }
+    if (Object.keys(changed).length === 0) {
+      return;
+    }
+    for (const target of this.states.values()) {
+      if (target === source) {
+        continue;
+      }
+      if (this.isVisible(target.el)) {
+        if (dy !== 0 || changed.x !== undefined) {
+          this.applyUserScroll(target, dy, changed.x);
+        }
+      } else {
+        // Contêiner oculto perde a rolagem; aplica ao voltar a ficar visível (onResize).
+        target.pendingSyncSnap = null;
+        target.pendingScroll = { ...(target.pendingScroll ?? {}), ...changed };
+      }
+    }
+  }
+
+  // Zoom do usuário: replica a escala numérica nos demais PDFs e alinha a rolagem à origem.
+  onScaleChanging(source, event) {
+    const scale = Number(event?.scale);
+    if (!this.settings.syncScrolling || this.applyingZoom || !(scale > 0)) {
+      return;
+    }
+    for (const target of this.states.values()) {
+      if (target === source || target.viewer?.currentScale === scale) {
+        continue;
+      }
+      if (this.isVisible(target.el)) {
+        this.applyZoom(target, scale);
+        this.applyScrollRatio(target, this.scrollRatio(source.el));
+      } else {
+        target.pendingScale = scale;
+        target.pendingScroll = this.scrollRatio(source.el);
+      }
+    }
+  }
+
+  applyZoom(state, scale) {
+    if (!state.viewer) {
+      return;
+    }
+    this.applyingZoom = true;
+    try {
+      state.viewer.currentScale = scale;
+    } finally {
+      this.applyingZoom = false;
+    }
+  }
+
+  scrollRatio(el) {
+    const maxY = Math.max(0, el.scrollHeight - el.clientHeight);
+    const maxX = Math.max(0, el.scrollWidth - el.clientWidth);
+    return {
+      y: maxY > 0 ? el.scrollTop / maxY : 0,
+      x: maxX > 0 ? el.scrollLeft / maxX : 0
+    };
+  }
+
+  // `ratio` pode trazer só um eixo; o outro mantém a posição atual do PDF.
+  applyScrollRatio(state, ratio) {
+    const el = state.el;
+    const current = this.scrollRatio(el);
+    const maxY = Math.max(0, el.scrollHeight - el.clientHeight);
+    const maxX = Math.max(0, el.scrollWidth - el.clientWidth);
+    const y = ratio.y ?? current.y;
+    const x = ratio.x ?? current.x;
+    this.writeScroll(state, maxX > 0 ? x * maxX : el.scrollLeft, maxY > 0 ? y * maxY : el.scrollTop);
+  }
+
+  // Desloca o PDF em `dy` pixels a partir da própria posição; `x` (proporção) é opcional.
+  applyUserScroll(state, dy, x) {
+    const el = state.el;
+    const maxX = Math.max(0, el.scrollWidth - el.clientWidth);
+    const left = x === undefined || maxX <= 0 ? el.scrollLeft : x * maxX;
+    this.writeScroll(state, left, el.scrollTop + dy);
+  }
+
+  writeScroll(state, left, top) {
+    const el = state.el;
+    this.clearFreeze(state);
+    state.pendingScroll = null;
+    state.expect = null;
+    state.selfScrollUntil = performance.now() + SELF_SCROLL_MS;
+    state.syncEchoUntil = performance.now() + SELF_SCROLL_MS;
+    el.scrollTo({ left, top, behavior: "instant" });
+    // O scroll resultante é eco desta sincronização e não deve ser replicado de volta.
+    this.markSyncTarget(state);
+    state.lastRatio = this.scrollRatio(el);
+    state.lastTop = el.scrollTop;
+    state.snap = this.captureSnap(state) ?? state.snap;
   }
 
   // ---------- captura e aplicação de posição ----------
@@ -654,6 +773,10 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
     if (!state || !this.isVisible(el)) {
       return;
     }
+    const prevRatio = state.lastRatio;
+    const prevTop = state.lastTop;
+    state.lastRatio = this.scrollRatio(el);
+    state.lastTop = el.scrollTop;
     if (this.consumeSyncTarget(state)) {
       state.snap = this.captureSnap(state) ?? state.snap;
       this.updateStatus();
@@ -666,6 +789,13 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
       }
       state.expect = null;
       this.savePosition(state);
+      this.syncScrollPosition(state, prevRatio, prevTop);
+      return;
+    }
+    // Eco da sincronização: não passa pela detecção de salto, anomalia ou freeze do destino.
+    if (this.settings.syncScrolling && performance.now() < (state.syncEchoUntil ?? 0)) {
+      state.snap = this.captureSnap(state) ?? state.snap;
+      this.updateStatus();
       return;
     }
     if (state.freeze) {
@@ -774,6 +904,20 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
     const visible = this.isVisible(state.el);
     const becameVisible = visible && !state.visible;
     state.visible = visible;
+    if (becameVisible && (state.pendingScale || state.pendingScroll)) {
+      if (state.pendingScale) {
+        const scale = state.pendingScale;
+        state.pendingScale = null;
+        this.applyZoom(state, scale);
+      }
+      if (state.pendingScroll) {
+        this.applyScrollRatio(state, {
+          ...(state.lastRatio ?? {}),
+          ...state.pendingScroll
+        });
+      }
+      return;
+    }
     if (becameVisible && state.pendingSyncSnap) {
       this.applyPendingSync(state);
       return;
@@ -956,6 +1100,8 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
     if (!this.settings.syncScrolling) {
       for (const state of this.states.values()) {
         state.pendingSyncSnap = null;
+        state.pendingScroll = null;
+        state.pendingScale = null;
         state.syncTarget = null;
       }
     }
@@ -1045,7 +1191,7 @@ module.exports = class PDFPreserveHorizontalScroll extends Plugin {
   }
 };
 
-class PDFPreserveScrollSettingTab extends PluginSettingTab {
+class PDFAdvancedScrollSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1054,7 +1200,7 @@ class PDFPreserveScrollSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "PDF Preserve Horizontal Scroll" });
+    containerEl.createEl("h2", { text: "PDF Advanced Scroll" });
 
     new Setting(containerEl)
       .setName("Modo de preservação horizontal")

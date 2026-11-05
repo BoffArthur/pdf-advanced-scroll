@@ -1,4 +1,4 @@
-# Análise: como o plugin `pdf-preserve-horizontal-scroll` chega aos valores do log
+# Análise: como o plugin `pdf-advanced-scroll` chega aos valores do log
 
 > **Nota (formato atual):** o log agora usa horário UTC ISO com milissegundos e `pdf=<id>` por contêiner, e registra só eventos que mudam posição (`JUMP`, `APPLY`, `FREEZE_START`, `FREEZE_END`, `INTENT`, `KEY`, `CONTROL`, `RESTORE`, `DESVIO`, `ANOMALIA`, `APPLY_SKIP`, `SYNC_UNAVAILABLE`). Os nomes antigos (`onScroll:JUMP-DETECTADO`, `apply:timer*`, `scroll(freeze)`, `keydown-raw`, `wrapper:*`) foram removidos, junto com o `[top= left= pg= off= frac=]` automático. Os trechos abaixo que citam esses nomes descrevem o formato anterior.
 
@@ -10,6 +10,21 @@ Constantes relevantes (`main.js`):
 - `PAGE_TOP_TOLERANCE_PX = 24` (linha 7): tolerância para considerar que o viewport está alinhado ao topo de uma página.
 - `USER_INTENT_MS = 500`: janela após interação do usuário em que a rolagem é tratada como manual.
 - `applyTimers = [0, 60, 150, 300]` (linha 602): reaplicações da posição após um salto.
+
+### Sincronização de rolagem manual (`syncScrolling`)
+
+Quando `syncScrolling` está ligado, a rolagem feita pelo usuário (wheel, toque, arraste da barra, teclas de rolagem) em um PDF é replicada nos demais:
+
+- `onScroll` (ramo de intenção do usuário) chama `syncScrollPosition(state, prevRatio, prevTop)`. A vertical é replicada como o **mesmo deslocamento em pixels** da origem (`applyUserScroll`, a partir da posição atual do destino), igual ao que o usuário faz na página selecionada. Não usa proporção, para que documentos de alturas diferentes não caiam em outro ponto.
+- A horizontal é replicada pela proporção (`scrollLeft / (scrollWidth - clientWidth)`), e só quando X mudou (`RATIO_EPSILON` = 1e-4). Assim, rolar só em Y não mexe no X dos demais, e vice-versa.
+- Todas as escritas passam por `writeScroll`, que marca o eco (`markSyncTarget`, `syncEchoUntil`) e limpa expectativa e freeze do destino. Eventos de scroll causados pela sincronização não entram na detecção de salto.
+- Escrita sem alcance de rolagem (`maxY`/`maxX` = 0) mantém o eixo atual, em vez de ir para 0.
+- **Isso ignora `positionMode` para a rolagem manual**: `applySnap` continua valendo para comandos de página, mas não para o scroll direto.
+- **Zoom:** `onScaleChanging` escuta o evento `scalechanging` do PDF.js. O zoom numérico (`currentScale`) é copiado para os demais PDFs e, em seguida, a proporção de rolagem da origem é reaplicada. Predefinições de zoom (ex.: largura da página) não são copiadas, pois cada painel tem largura diferente.
+- PDFs ocultos não recebem `scrollTo` nem zoom (o navegador zera a rolagem de elementos ocultos). A proporção e o zoom ficam em `pendingScroll` / `pendingScale` e são aplicados em `onResize` quando o contêiner volta a ficar visível.
+- Anti-eco: cada `scrollTo` aplicado registra a posição final com `markSyncTarget`, e o evento de scroll resultante é consumido em `consumeSyncTarget`, sem reenviar a sincronização. Zoom usa a flag `applyingZoom` para não reenviar.
+- Rolagens sem intenção do usuário (por exemplo, o ajuste de layout) não são replicadas.
+- `syncScrolling` vem desligado por padrão (`DEFAULT_SETTINGS`); o valor salvo em `data.json` tem precedência.
 
 ---
 

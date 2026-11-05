@@ -281,7 +281,7 @@ test("botão da barra de status ativa e desativa a sincronização", () =>
     assert.ok(button.classList.contains("pps-sync-off"));
   }));
 
-test("rolagem manual não move os demais PDFs (sync só por comando)", () =>
+test("rolagem manual replica a posição (vertical e X) nos demais PDFs", () =>
   withPDF({}, async ({ make, plugin }) => {
     const a = make();
     const b = make();
@@ -289,7 +289,9 @@ test("rolagem manual não move os demais PDFs (sync só por comando)", () =>
     a.userScroll(POS_TOP, POS_LEFT);
     await sleep(30);
     assert.equal(a.currentPage(), 3);
-    assert.equal(b.currentPage(), 1);
+    assert.equal(b.currentPage(), 3);
+    near(b.frac(), 0.4, "fração");
+    near(b.geo.scrollLeft, POS_LEFT, "X");
   }));
 
 test("scroll programático de layout não inicia uma sincronização", () =>
@@ -307,10 +309,11 @@ test("PageDown avança cada PDF a partir da própria página, sem igualar númer
   withPDF({}, async ({ make, plugin }) => {
     const a = make();
     const b = make();
-    plugin.settings.syncScrolling = true;
+    plugin.settings.syncScrolling = false;
     a.userScroll(POS_TOP, POS_LEFT);
     b.userScroll(6 * STEP + 0.2 * PAGE_H, 120);
     await sleep(20);
+    plugin.settings.syncScrolling = true;
     plugin.app.workspace.activeLeaf = a.leaf;
     a.container.dispatchEvent(
       new window.KeyboardEvent("keydown", { key: "PageDown", bubbles: true, cancelable: true })
@@ -327,10 +330,11 @@ test("controle de próxima página avança cada PDF a partir da própria página
   withPDF({}, async ({ make, plugin }) => {
     const a = make();
     const b = make();
-    plugin.settings.syncScrolling = true;
+    plugin.settings.syncScrolling = false;
     a.userScroll(POS_TOP, POS_LEFT);
     b.userScroll(6 * STEP + 0.2 * PAGE_H, 120);
     await sleep(20);
+    plugin.settings.syncScrolling = true;
     a.next.dispatchEvent(new window.Event("click", { bubbles: true }));
     await sleep(30);
     assert.equal(a.currentPage(), 4);
@@ -342,10 +346,11 @@ test("comando de página é bloqueado para todos quando um PDF está no limite",
   withPDF({}, async ({ make, plugin }) => {
     const a = make({ pages: 6 });
     const b = make({ pages: 3 });
-    plugin.settings.syncScrolling = true;
+    plugin.settings.syncScrolling = false;
     a.userScroll(2 * STEP + 0.2 * PAGE_H, POS_LEFT);
     b.userScroll(2 * STEP + 0.2 * PAGE_H, POS_LEFT);
     await sleep(20);
+    plugin.settings.syncScrolling = true;
     plugin.app.workspace.activeLeaf = a.leaf;
     const oldATop = a.geo.scrollTop;
     const oldBTop = b.geo.scrollTop;
@@ -375,15 +380,16 @@ test("PageDown é interrompido se o PDF de origem estiver no fim", () =>
     assert.match(plugin.syncStatusBarItem.textContent, /limite/);
   }));
 
-test("rolagem de origem avança e não move os demais PDFs", () =>
+test("rolagem de origem é replicada em pixels nos demais PDFs", () =>
   withPDF({}, async ({ make, plugin }) => {
     const a = make({ pages: 6 });
     const b = make({ pages: 3 });
     plugin.settings.syncScrolling = true;
-    a.userScroll(3 * STEP + 0.2 * PAGE_H, POS_LEFT);
+    const top = 3 * STEP + 0.2 * PAGE_H;
+    a.userScroll(top, POS_LEFT);
     await sleep(30);
     assert.equal(a.currentPage(), 4);
-    assert.equal(b.currentPage(), 1);
+    near(b.geo.scrollTop, top, "posição vertical em pixels");
     assert.doesNotMatch(plugin.syncStatusBarItem.textContent, /limite/);
   }));
 
@@ -407,4 +413,163 @@ test("PDF oculto recebe o mesmo deslocamento de páginas ao voltar a ficar visí
     assert.equal(a.currentPage(), 4);
     assert.equal(b.currentPage(), 4);
     near(b.frac(), 0.4, "fração");
+  }));
+
+test("rolagem em qualquer PDF replica nos demais (nos dois sentidos)", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    b.userScroll(POS_TOP, POS_LEFT);
+    await sleep(30);
+    assert.equal(a.currentPage(), 3);
+    near(a.frac(), 0.4, "fração");
+    near(a.geo.scrollLeft, POS_LEFT, "X");
+  }));
+
+test("arraste da barra de rolagem replica a posição durante o movimento", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    a.container.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+    // Após a janela de intenção, só o estado de arraste mantém a rolagem como manual.
+    await sleep(600);
+    a.geo.scrollTop = POS_TOP;
+    a.container.dispatchEvent(new window.Event("scroll"));
+    await sleep(30);
+    a.container.dispatchEvent(new window.Event("pointerup", { bubbles: true }));
+    assert.equal(b.currentPage(), 3);
+    near(b.frac(), 0.4, "fração");
+  }));
+
+test("PDF oculto recebe a posição de rolagem ao voltar a ficar visível", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    b.hide();
+    a.userScroll(POS_TOP, POS_LEFT);
+    await sleep(20);
+    b.show();
+    await sleep(30);
+    assert.equal(b.currentPage(), 3);
+    near(b.frac(), 0.4, "fração");
+    near(b.geo.scrollLeft, POS_LEFT, "X");
+  }));
+
+test("sincronização não gera eco: o PDF de origem não é reajustado", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    let aCalls = 0;
+    let bCalls = 0;
+    const scrollA = a.container.scrollTo;
+    const scrollB = b.container.scrollTo;
+    a.container.scrollTo = (opts) => {
+      aCalls++;
+      scrollA(opts);
+    };
+    b.container.scrollTo = (opts) => {
+      bCalls++;
+      scrollB(opts);
+    };
+    a.userScroll(POS_TOP, POS_LEFT);
+    await sleep(50);
+    assert.equal(aCalls, 0);
+    assert.equal(bCalls, 1);
+  }));
+
+test("rolagem só em X não altera a posição Y dos demais PDFs", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make({ pages: 6 });
+    const b = make({ pages: 3 });
+    plugin.settings.syncScrolling = false;
+    a.userScroll(0, 0);
+    b.userScroll(STEP + 0.3 * PAGE_H, 0);
+    await sleep(20);
+    plugin.settings.syncScrolling = true;
+    const bTop = b.geo.scrollTop;
+    a.userScroll(a.geo.scrollTop, POS_LEFT);
+    await sleep(30);
+    near(b.geo.scrollTop, bTop, "Y do destino");
+    near(b.geo.scrollLeft, POS_LEFT, "X do destino");
+  }));
+
+test("zoom em um PDF é replicado nos demais sem eco", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    a.userScroll(POS_TOP, POS_LEFT);
+    await sleep(30);
+    let aScaleEvents = 0;
+    a.viewer.eventBus.on("scalechanging", () => aScaleEvents++);
+    a.viewer.currentScale = 1.5;
+    assert.equal(b.viewer.currentScale, 1.5);
+    assert.equal(aScaleEvents, 1);
+    near(b.geo.scrollTop, POS_TOP, "Y após zoom");
+    near(b.geo.scrollLeft, POS_LEFT, "X após zoom");
+  }));
+
+test("zoom aplicado a PDF oculto acontece ao voltar a ficar visível", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    plugin.settings.syncScrolling = true;
+    b.hide();
+    a.viewer.currentScale = 1.25;
+    assert.equal(b.viewer.currentScale, 1);
+    b.show();
+    await sleep(10);
+    assert.equal(b.viewer.currentScale, 1.25);
+  }));
+
+test("com o sync desligado, zoom não é replicado", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    a.viewer.currentScale = 2;
+    assert.equal(b.viewer.currentScale, 1);
+  }));
+
+test("rolagem Y na origem desloca os demais PDFs na mesma distância em pixels", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make({ pages: 6 });
+    const b = make({ pages: 3 });
+    plugin.settings.syncScrolling = true;
+    a.userScroll(0, 0);
+    await sleep(20);
+    a.userScroll(1234, 0);
+    await sleep(30);
+    near(b.geo.scrollTop, 1234, "Y do destino em pixels");
+    a.userScroll(1100, 0);
+    await sleep(30);
+    near(b.geo.scrollTop, 1100, "Y do destino ao voltar");
+  }));
+
+test("sync de rolagem Y não é desfeito pela detecção de anomalia do destino", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const VIEW_H = 600;
+    const a = make({ pages: 6 });
+    const b = make({ pages: 4 });
+    plugin.settings.syncScrolling = true;
+    b.userScroll(3 * (PAGE_H + GAP), 0);
+    await sleep(20);
+    const stateB = [...plugin.states.values()].find((s) => s.viewer === b.viewer);
+    stateB.expect = { page: 4, frac: 0.3, at: performance.now(), snap: plugin.captureSnap(stateB) };
+    a.userScroll((6 * (PAGE_H + GAP) - VIEW_H) / 2, 0);
+    await sleep(40);
+    near(b.geo.scrollTop, 3 * (PAGE_H + GAP) - 300, "Y do destino após rolagem em A");
+  }));
+
+test("com o sync desligado, rolagem manual não move os demais PDFs", () =>
+  withPDF({}, async ({ make, plugin }) => {
+    const a = make();
+    const b = make();
+    a.userScroll(POS_TOP, POS_LEFT);
+    await sleep(30);
+    assert.equal(b.currentPage(), 1);
+    assert.equal(b.geo.scrollTop, 0);
   }));
