@@ -1,0 +1,1 @@
+{"name":"pdf-preserve-scroll-tests","private":true,"scripts":{"test":"node --test ."},"devDependencies":{"jsdom":"^22.1.0"}}
